@@ -1,0 +1,8 @@
+services:
+  menu-scraper:
+    build: .
+    ports:
+      - '3333:3333'
+    environment:
+      - NODE_ENV=production
+      - PORT=3333
