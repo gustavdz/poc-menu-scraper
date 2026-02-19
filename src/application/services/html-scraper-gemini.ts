@@ -9,10 +9,9 @@ import z from 'zod';
 
 const TIMEOUT_IN_MS = 300000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-2.5-flash';
+// const GEMINI_MODEL = 'gemini-3-flash-preview';
 // const GEMINI_MODEL = 'gemini-2.5-flash-lite';
-// const GEMINI_MODEL = 'gemini-3-pro-preview';
-const GEMINI_MODEL = 'gemini-3-flash-preview';
 
 const ai = new GoogleGenAI({
   apiKey: GEMINI_API_KEY,
@@ -39,7 +38,7 @@ export const scrapeUrl = async (
         : false;
 
     logger.info('HTML cleaned', { isTruncated, cleanedHtml });
-    const menuScrapeResult = await extractMenuWithGemini(cleanedHtml.content, url);
+    const menuScrapeResult = await extractMenuWithGemini(cleanedHtml.content);
 
     return {
       menuScrapeResult,
@@ -117,7 +116,7 @@ const cleanHtml = (
 };
 
 // Extract menu data using Gemini API
-const extractMenuWithGemini = async (html: string, url: string): Promise<MenuResult> => {
+const extractMenuWithGemini = async (html: string): Promise<MenuResult> => {
   if (!GEMINI_API_KEY) {
     logger.error('GEMINI_API_KEY is missing');
     throw new Error('GEMINI_API_KEY not found in environment variables');
