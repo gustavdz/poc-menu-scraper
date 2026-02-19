@@ -7,10 +7,9 @@ import prompt from './prompts/prompts';
 
 const TIMEOUT_IN_MS = 300000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// const GEMINI_MODEL = 'gemini-2.5-flash';
-const GEMINI_MODEL = 'gemini-3-flash-preview';
+const GEMINI_MODEL = 'gemini-2.5-flash';
+// const GEMINI_MODEL = 'gemini-3-flash-preview';
 // const GEMINI_MODEL = 'gemini-2.5-flash-lite';
-// const GEMINI_MODEL = 'gemini-3-pro-preview';
 
 const ai = new GoogleGenAI({
   apiKey: GEMINI_API_KEY,
@@ -37,14 +36,9 @@ export const scrapeUrl = async (
         : false;
 
     logger.info('HTML cleaned', { isTruncated, cleanedHtml });
-    const menuData = await extractMenuWithGemini(cleanedHtml.content, url);
+    const menuData = await extractMenuWithGemini(cleanedHtml.content);
     logger.info('Menu data extracted', { menuData: [] });
     return {
-      // menuData: {
-      //   restaurant_name: 'Not Found',
-      //   last_updated: new Date().toISOString(),
-      //   menus: [{ menu_name: 'Not Found', sections: [] }],
-      // },
       menuData,
       url,
       isTruncated,
@@ -103,15 +97,14 @@ const cleanHtml = (
 
   // Limit size (Gemini has token limits)
   const maxLength = 30000; // ~7500 tokens
-  return ldJson
-    ? { type: 'ld+json', content: JSON.parse(ldJson) }
-    : bodyHtml.length > maxLength
-      ? { type: 'string', content: bodyHtml.substring(0, maxLength - 14) + '...[truncated]' }
-      : { type: 'string', content: bodyHtml };
+
+  return bodyHtml.length > maxLength
+    ? { type: 'string', content: bodyHtml.substring(0, maxLength - 14) + '...[truncated]' }
+    : { type: 'string', content: bodyHtml };
 };
 
 // Extract menu data using Gemini API
-const extractMenuWithGemini = async (html: string, url: string): Promise<MenuData> => {
+const extractMenuWithGemini = async (html: string): Promise<MenuData> => {
   if (!GEMINI_API_KEY) {
     logger.error('GEMINI_API_KEY is missing');
     throw new Error('GEMINI_API_KEY not found in environment variables');
