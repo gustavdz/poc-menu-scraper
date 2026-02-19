@@ -1,16 +1,18 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { MenuData } from '../../shared/types';
+import { MenuResult, MenuItem } from '../../shared/types';
 import { logger } from '../../shared/logger';
 import prompt from './prompts/prompts';
+import { geminiMenuSchema, FlatMenuResultSchema } from '../../shared/schemas';
+import z from 'zod';
 
 const TIMEOUT_IN_MS = 300000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 // const GEMINI_MODEL = 'gemini-2.5-flash';
-const GEMINI_MODEL = 'gemini-3-flash-preview';
 // const GEMINI_MODEL = 'gemini-2.5-flash-lite';
 // const GEMINI_MODEL = 'gemini-3-pro-preview';
+const GEMINI_MODEL = 'gemini-3-flash-preview';
 
 const ai = new GoogleGenAI({
   apiKey: GEMINI_API_KEY,
@@ -21,7 +23,7 @@ const ai = new GoogleGenAI({
 export const scrapeUrl = async (
   url: string,
 ): Promise<{
-  menuData: MenuData;
+  menuScrapeResult: MenuResult;
   htmlContent: string | object;
   url: string;
   isTruncated: boolean;
@@ -37,15 +39,10 @@ export const scrapeUrl = async (
         : false;
 
     logger.info('HTML cleaned', { isTruncated, cleanedHtml });
-    const menuData = await extractMenuWithGemini(cleanedHtml.content, url);
-    logger.info('Menu data extracted', { menuData: [] });
+    const menuScrapeResult = await extractMenuWithGemini(cleanedHtml.content, url);
+
     return {
-      // menuData: {
-      //   restaurant_name: 'Not Found',
-      //   last_updated: new Date().toISOString(),
-      //   menus: [{ menu_name: 'Not Found', sections: [] }],
-      // },
-      menuData,
+      menuScrapeResult,
       url,
       isTruncated,
       htmlContent: cleanedHtml.content,
@@ -82,11 +79,22 @@ const cleanHtml = (
   $('style, noscript, svg, canvas').remove();
 
   // Get all the ldJson scripts data if there is any
-  const ldJson = $('script[type="application/ld+json"]').html();
-  if (ldJson) {
-    logger.info('ldJson found', { ldJson });
-  } else {
+  const ldJson = $('script[type="application/ld+json"]').each((_, el) => {
+    const ldJsonElement = $(el).html();
+    if (ldJsonElement) {
+      const ldJsonFormatted = JSON.parse(ldJsonElement);
+      if (ldJsonFormatted['@type'] === 'Menu') {
+        return true;
+      }
+    }
+  });
+  const ldJsonContent = ldJson.html();
+  if (!ldJsonContent) {
     logger.warn('No ldJson found');
+  } else {
+    const JSONldJsonContent = JSON.parse(ldJsonContent);
+    logger.info('ldJson found', { ldJson: JSONldJsonContent });
+    return { type: 'ld+json', content: JSONldJsonContent };
   }
 
   // Remove comments
@@ -103,15 +111,13 @@ const cleanHtml = (
 
   // Limit size (Gemini has token limits)
   const maxLength = 30000; // ~7500 tokens
-  return ldJson
-    ? { type: 'ld+json', content: JSON.parse(ldJson) }
-    : bodyHtml.length > maxLength
-      ? { type: 'string', content: bodyHtml.substring(0, maxLength - 14) + '...[truncated]' }
-      : { type: 'string', content: bodyHtml };
+  return bodyHtml.length > maxLength
+    ? { type: 'string', content: bodyHtml.substring(0, maxLength - 14) + '...[truncated]' }
+    : { type: 'string', content: bodyHtml };
 };
 
 // Extract menu data using Gemini API
-const extractMenuWithGemini = async (html: string, url: string): Promise<MenuData> => {
+const extractMenuWithGemini = async (html: string, url: string): Promise<MenuResult> => {
   if (!GEMINI_API_KEY) {
     logger.error('GEMINI_API_KEY is missing');
     throw new Error('GEMINI_API_KEY not found in environment variables');
@@ -120,16 +126,37 @@ const extractMenuWithGemini = async (html: string, url: string): Promise<MenuDat
   const prompt = buildPrompt(html);
 
   try {
+    const { name: modelName } = await ai.models.get({ model: GEMINI_MODEL });
+    if (!modelName) {
+      const errorMessage = `Model not found`;
+      logger.error(errorMessage, { model: GEMINI_MODEL });
+      throw new Error(errorMessage);
+    }
+    const { totalTokens } = await ai.models.countTokens({ model: modelName, contents: prompt });
+    const responseJsonSchema = z.toJSONSchema(FlatMenuResultSchema);
+
+    logger.info('Generating content with AI', {
+      totalInputTokens: totalTokens,
+      responseJsonSchema: responseJsonSchema.properties,
+      geminiMenuSchema,
+    });
+
     const response = await ai.models
       .generateContent({
         model: GEMINI_MODEL,
-        contents: { parts: [{ text: prompt }] },
+        contents: prompt,
         config: {
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.MEDIUM,
+          },
           temperature: 0.1,
           topK: 1,
           topP: 1,
-          maxOutputTokens: 16384,
+          maxOutputTokens: 16384, // 8192 or 16384
           responseMimeType: 'application/json',
+          responseJsonSchema: geminiMenuSchema,
+          systemInstruction:
+            'Act as a Senior Data Engineer specializing in DOM parsing and unstructured web content extraction. Your task is to analyze a raw HTML page dump and transform it into a clean, structured JSON menu.',
         },
       })
       .catch((error) => {
@@ -138,7 +165,7 @@ const extractMenuWithGemini = async (html: string, url: string): Promise<MenuDat
       });
 
     logger.info('Gemini API response', { response });
-    const generatedText = response?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const generatedText = response.text;
 
     if (!generatedText) {
       throw new Error('No response from Gemini API');
@@ -159,25 +186,55 @@ const buildPrompt = (html: string): string => {
 };
 
 // Parse Gemini response
-const parseGeminiResponse = (responseText: string): MenuData => {
+const parseGeminiResponse = (responseText: string): MenuResult => {
   try {
-    // Remove markdown code blocks if present
-    const cleanedResponse = responseText
-      .trim()
-      .replace(/```json\n?/g, '')
-      .replace(/```\n?/g, '');
+    // Parse using the flat schema first
+    const flatMenuParsed = FlatMenuResultSchema.safeParse(JSON.parse(responseText));
 
-    logger.info('parsing response to JSON', { cleanedResponse });
-
-    const parsed = JSON.parse(cleanedResponse);
-    logger.info('response parsed successfully to JSON', { parsed });
-
-    // Validate basic structure
-    if (!parsed.restaurant_name || !Array.isArray(parsed.menus)) {
-      throw new Error('Invalid menu data structure from Gemini');
+    if (!flatMenuParsed.success) {
+      logger.error('Zod validation failed for FlatMenuResultSchema', {
+        error: flatMenuParsed.error,
+      });
+      throw flatMenuParsed.error;
     }
 
-    return parsed as MenuData;
+    const flatData = flatMenuParsed.data;
+
+    // Transform flat data to nested MenuResult structure
+    const menusMap = flatData.items.reduce((acc, item) => {
+      const menuItem: MenuItem = {
+        name: item.name,
+        description: item.description,
+        price: item.price,
+        currency: item.currency,
+        image_url: item.imageUrl ?? null,
+        variations: item.variations.map((v) => ({ name: v.name, price_adj: v.priceAdj })),
+      };
+
+      const sectionsMap = acc.get(item.menuName) ?? new Map<string, MenuItem[]>();
+      const currentItems = sectionsMap.get(item.sectionName) ?? [];
+
+      sectionsMap.set(item.sectionName, [...currentItems, menuItem]);
+      acc.set(item.menuName, sectionsMap);
+
+      return acc;
+    }, new Map<string, Map<string, MenuItem[]>>());
+
+    const menus = Array.from(menusMap.entries()).map(([menuName, sectionsMap]) => ({
+      menu_name: menuName,
+      sections: Array.from(sectionsMap.entries()).map(([sectionName, items]) => ({
+        section_name: sectionName,
+        items,
+      })),
+    }));
+
+    const result: MenuResult = {
+      restaurant_name: flatData.restaurantName,
+      last_updated: flatData.lastUpdated || new Date().toISOString(),
+      menus: menus,
+    };
+
+    return result;
   } catch (error) {
     throw new Error(
       `Failed to parse Gemini response: ${error instanceof Error ? error.message : 'Invalid JSON'}`,

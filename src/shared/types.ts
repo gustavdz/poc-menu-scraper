@@ -1,5 +1,5 @@
 import z from 'zod';
-import { NpmLogLevelSchema, ScrapeRequestSchema } from './schemas';
+import { MenuResultSchema, NpmLogLevelSchema, ScrapeRequestSchema } from './schemas';
 
 export interface MenuVariation {
   name: string;
@@ -44,3 +44,4 @@ export interface ScrapeResponse {
 
 export type NpmLogLevel = z.infer<typeof NpmLogLevelSchema>;
 export type ScrapeRequest = z.infer<typeof ScrapeRequestSchema>;
+export type MenuResult = z.infer<typeof MenuResultSchema>;
