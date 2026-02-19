@@ -24,7 +24,9 @@ router.post('/', async (req, res, next) => {
           const data = await scrapeUrl(url);
           return { url, success: true, data };
         } catch (error) {
-          logger.error('scrapping failed', { error });
+          logger.error('scrapping failed', {
+            error: error instanceof Error ? error.message : error,
+          });
           return {
             url,
             success: false,

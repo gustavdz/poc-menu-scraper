@@ -3,12 +3,14 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { MenuData } from '../../shared/types';
 import { logger } from '../../shared/logger';
-import { promptFromClaudeCode, promptFromLyra } from './prompts/prompts';
+import prompt from './prompts/prompts';
 
 const TIMEOUT_IN_MS = 300000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// const GEMINI_MODEL = 'gemini-2.5-flash';
 const GEMINI_MODEL = 'gemini-3-flash-preview';
-// const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+// const GEMINI_MODEL = 'gemini-3-pro-preview';
 
 const ai = new GoogleGenAI({
   apiKey: GEMINI_API_KEY,
@@ -16,17 +18,38 @@ const ai = new GoogleGenAI({
 });
 
 // Main scraping function
-export const scrapeUrl = async (url: string): Promise<MenuData> => {
-  // export const scrapeUrl = async (url: string): Promise<{ htmlContent: string }> => {
+export const scrapeUrl = async (
+  url: string,
+): Promise<{
+  menuData: MenuData;
+  htmlContent: string | object;
+  url: string;
+  isTruncated: boolean;
+}> => {
   try {
     logger.info('Scraping URL', { url });
     const html = await fetchHtml(url);
     logger.info('HTML fetched');
     const cleanedHtml = cleanHtml(html);
-    logger.info('HTML cleaned', { isTruncated: cleanedHtml.includes('...[truncated]') });
-    const menuData = await extractMenuWithGemini(cleanedHtml, url);
-    logger.info('Menu data extracted', { menuData });
-    return menuData;
+    const isTruncated =
+      cleanedHtml.type === 'string' && cleanedHtml.content.includes('...[truncated]')
+        ? true
+        : false;
+
+    logger.info('HTML cleaned', { isTruncated, cleanedHtml });
+    const menuData = await extractMenuWithGemini(cleanedHtml.content, url);
+    logger.info('Menu data extracted', { menuData: [] });
+    return {
+      // menuData: {
+      //   restaurant_name: 'Not Found',
+      //   last_updated: new Date().toISOString(),
+      //   menus: [{ menu_name: 'Not Found', sections: [] }],
+      // },
+      menuData,
+      url,
+      isTruncated,
+      htmlContent: cleanedHtml.content,
+    };
   } catch (error) {
     throw error;
   }
@@ -50,11 +73,21 @@ const fetchHtml = async (url: string): Promise<string> => {
 };
 
 // Clean HTML - remove scripts, styles, and unnecessary tags
-const cleanHtml = (html: string): string => {
+const cleanHtml = (
+  html: string,
+): { type: 'string'; content: string } | { type: 'ld+json'; content: any } => {
   const $ = cheerio.load(html);
 
   // Remove unnecessary elements
   $('style, noscript, svg, canvas').remove();
+
+  // Get all the ldJson scripts data if there is any
+  const ldJson = $('script[type="application/ld+json"]').html();
+  if (ldJson) {
+    logger.info('ldJson found', { ldJson });
+  } else {
+    logger.warn('No ldJson found');
+  }
 
   // Remove comments
   $('*')
@@ -70,9 +103,11 @@ const cleanHtml = (html: string): string => {
 
   // Limit size (Gemini has token limits)
   const maxLength = 30000; // ~7500 tokens
-  return bodyHtml.length > maxLength
-    ? bodyHtml.substring(0, maxLength - 14) + '...[truncated]'
-    : bodyHtml;
+  return ldJson
+    ? { type: 'ld+json', content: JSON.parse(ldJson) }
+    : bodyHtml.length > maxLength
+      ? { type: 'string', content: bodyHtml.substring(0, maxLength - 14) + '...[truncated]' }
+      : { type: 'string', content: bodyHtml };
 };
 
 // Extract menu data using Gemini API
@@ -82,7 +117,7 @@ const extractMenuWithGemini = async (html: string, url: string): Promise<MenuDat
     throw new Error('GEMINI_API_KEY not found in environment variables');
   }
 
-  const prompt = buildPrompt(html, 2);
+  const prompt = buildPrompt(html);
 
   try {
     const response = await ai.models
@@ -93,7 +128,8 @@ const extractMenuWithGemini = async (html: string, url: string): Promise<MenuDat
           temperature: 0.1,
           topK: 1,
           topP: 1,
-          maxOutputTokens: 8192,
+          maxOutputTokens: 16384,
+          responseMimeType: 'application/json',
         },
       })
       .catch((error) => {
@@ -108,7 +144,7 @@ const extractMenuWithGemini = async (html: string, url: string): Promise<MenuDat
       throw new Error('No response from Gemini API');
     }
 
-    return parseGeminiResponse(generatedText, url);
+    return parseGeminiResponse(generatedText);
   } catch (error) {
     if (axios.isAxiosError(error)) {
       throw new Error(`Gemini API error: ${error.response?.data?.error?.message || error.message}`);
@@ -118,15 +154,12 @@ const extractMenuWithGemini = async (html: string, url: string): Promise<MenuDat
 };
 
 // Build prompt for Gemini
-const buildPrompt = (html: string, version: number = 1): string => {
-  if (version > 1) {
-    return promptFromLyra(html);
-  }
-  return promptFromClaudeCode(html);
+const buildPrompt = (html: string): string => {
+  return prompt(html);
 };
 
 // Parse Gemini response
-const parseGeminiResponse = (responseText: string, url: string): MenuData => {
+const parseGeminiResponse = (responseText: string): MenuData => {
   try {
     // Remove markdown code blocks if present
     const cleanedResponse = responseText
@@ -136,20 +169,15 @@ const parseGeminiResponse = (responseText: string, url: string): MenuData => {
 
     logger.info('parsing response to JSON', { cleanedResponse });
 
-    try {
-      const parsed = JSON.parse(cleanedResponse);
-      logger.info('response parsed successfully to JSON', { parsed });
+    const parsed = JSON.parse(cleanedResponse);
+    logger.info('response parsed successfully to JSON', { parsed });
 
-      // Validate basic structure
-      if (!parsed.restaurant_name || !Array.isArray(parsed.sections)) {
-        throw new Error('Invalid menu data structure from Gemini');
-      }
-
-      return parsed as MenuData;
-    } catch (parseError) {
-      logger.error('JSON parse failed', { error: parseError, cleanedResponse });
-      throw parseError;
+    // Validate basic structure
+    if (!parsed.restaurant_name || !Array.isArray(parsed.menus)) {
+      throw new Error('Invalid menu data structure from Gemini');
     }
+
+    return parsed as MenuData;
   } catch (error) {
     throw new Error(
       `Failed to parse Gemini response: ${error instanceof Error ? error.message : 'Invalid JSON'}`,

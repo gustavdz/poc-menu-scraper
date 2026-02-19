@@ -23,7 +23,12 @@ export interface MenuSection {
 export interface MenuData {
   restaurant_name: string;
   last_updated: string;
-  sections: MenuSection[];
+  menus: [
+    {
+      menu_name: string;
+      sections: MenuSection[];
+    },
+  ];
 }
 
 export interface ScrapeResult {
