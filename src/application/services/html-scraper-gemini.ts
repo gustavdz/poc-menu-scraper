@@ -145,9 +145,9 @@ const extractMenuWithGemini = async (html: string): Promise<MenuResult> => {
         model: GEMINI_MODEL,
         contents: prompt,
         config: {
-          thinkingConfig: {
-            thinkingLevel: ThinkingLevel.MEDIUM,
-          },
+          // thinkingConfig: {
+          //   thinkingLevel: ThinkingLevel.LOW,
+          // },
           temperature: 0.1,
           topK: 1,
           topP: 1,
